@@ -6,7 +6,13 @@ local require = require(loader).bootstrapPlugin(modules)
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local CoreGui = game:GetService("CoreGui")
 local Selection = game:GetService("Selection")
+local ServerStorage = game:GetService("ServerStorage")
 local UserInputService = game:GetService("UserInputService")
+
+-- Macros authored in the open place rather than compiled into the plugin. Edit one, let the sync
+-- tool write it, and the palette reloads itself. No rebuild, no Studio restart.
+local LIVE_FOLDER = "Macros"
+local LIVE_DEBOUNCE = 0.4
 
 local Blend = require("Blend")
 local CommandGroup = require("CommandGroup")
@@ -16,6 +22,78 @@ local MacroToast = require("MacroToast")
 local Maid = require("Maid")
 local RxInstanceUtils = require("RxInstanceUtils")
 local ValueObject = require("ValueObject")
+
+local function collectGroupFolders()
+	local groups = {}
+
+	for _, group in script.macros:GetChildren() do
+		if group:IsA("Folder") then
+			table.insert(groups, { folder = group, live = false })
+		end
+	end
+
+	local liveRoot = ServerStorage:FindFirstChild(LIVE_FOLDER)
+	if liveRoot then
+		for _, group in liveRoot:GetChildren() do
+			if group:IsA("Folder") then
+				table.insert(groups, { folder = group, live = true })
+			end
+		end
+	end
+
+	return groups
+end
+
+-- TRAP: require caches by instance and a Source edit does not invalidate it, so a live macro must be
+-- required through a throwaway clone or the palette keeps running the version it first saw.
+local function requireMacro(module, live)
+	local ok, result = pcall(require, if live then module:Clone() else module)
+	if not ok then
+		warn(`[StudioMacros]: {module:GetFullName()} failed to load: {result}`)
+		return nil
+	end
+
+	if type(result) == "function" then
+		ok, result = pcall(result, require)
+		if not ok then
+			warn(`[StudioMacros]: {module:GetFullName()} failed to load: {result}`)
+			return nil
+		end
+	end
+
+	if type(result) ~= "table" or type(result.Name) ~= "string" or type(result.Macro) ~= "function" then
+		warn(`[StudioMacros]: {module:GetFullName()} is not a macro, it needs a Name and a Macro`)
+		return nil
+	end
+
+	return result
+end
+
+-- Roblox has no API to remove a PluginAction, and creating one twice with the same id throws, so a
+-- reload has to hand back the action it made the first time.
+local pluginActions = {}
+local function getPluginAction(plugin, macroData)
+	local existing = pluginActions[macroData.Name]
+	if existing then
+		return existing
+	end
+
+	local ok, action = pcall(function()
+		return plugin:CreatePluginAction(
+			macroData.Name,
+			macroData.Name,
+			`[StudioMacros]: {macroData.Description or macroData.Name}`,
+			"rbxassetid://5972593639",
+			true
+		)
+	end)
+	if not ok then
+		return nil
+	end
+
+	pluginActions[macroData.Name] = action
+	return action
+end
 
 local function getToggleValue(macroData, instance)
 	if not string.find(macroData.Name, "Toggle", 1, true) then
@@ -172,14 +250,22 @@ local function initialize(plugin)
 	local lastActivated: ((boolean?, ...any) -> ())? = nil
 	local lastArguments: { any }? = nil
 
-	for index, group in script.macros:GetChildren() do
-		if group:IsA("Folder") then
+	for index, entry in collectGroupFolders() do
+		local group, live = entry.folder, entry.live
+		do
 			local groupDataModule = group:FindFirstChild("GroupData")
 			if not groupDataModule then
 				continue
 			end
 
-			local groupData = require(groupDataModule)
+			local groupData = if live then requireMacro(groupDataModule, true) else require(groupDataModule)
+			if type(groupData) ~= "table" or type(groupData.Name) ~= "string" then
+				if live then
+					warn(`[StudioMacros]: {group:GetFullName()} needs a GroupData returning a Name`)
+				end
+				continue
+			end
+
 			local groupEntry = pane:AddGroup(groupData)
 			groupEntry.LayoutOrder.Value = index
 
@@ -197,7 +283,15 @@ local function initialize(plugin)
 					continue
 				end
 
-				local macroData = require(macro)
+				local macroData
+				if live then
+					macroData = requireMacro(macro, true)
+					if not macroData then
+						continue
+					end
+				else
+					macroData = require(macro)
+				end
 
 				if type(macroData) == "function" then
 					macroData = macroData(require)
@@ -207,13 +301,7 @@ local function initialize(plugin)
 					macroData.Initialize(plugin)
 				end
 
-				local pluginAction = plugin:CreatePluginAction(
-					macroData.Name,
-					macroData.Name,
-					"[StudioMacros]: " .. macroData.Description,
-					"rbxassetid://5972593639",
-					true
-				)
+				local pluginAction = getPluginAction(plugin, macroData)
 
 				local macroEntry = groupEntry:AddEntry(macroData)
 				macroEntry:SetDefaultIndex(macroIndex)
@@ -448,7 +536,9 @@ local function initialize(plugin)
 				end))
 
 				maid:GiveTask(macroEntry.Activated:Connect(activated))
-				maid:GiveTask(pluginAction.Triggered:Connect(activated))
+				if pluginAction then
+					maid:GiveTask(pluginAction.Triggered:Connect(activated))
+				end
 			end
 		end
 	end
@@ -457,5 +547,48 @@ local function initialize(plugin)
 end
 
 if plugin then
-	initialize(plugin)
+	local currentMaid = initialize(plugin)
+
+	-- The palette has no API to drop a group, so a reload rebuilds the whole thing. The cached
+	-- PluginActions survive it, which is the only reason a rebuild is legal at all.
+	local watchMaid = Maid.new()
+	local queued = false
+
+	local function reload()
+		if queued then
+			return
+		end
+		queued = true
+
+		task.delay(LIVE_DEBOUNCE, function()
+			queued = false
+			if currentMaid then
+				currentMaid:Destroy()
+			end
+			currentMaid = initialize(plugin)
+		end)
+	end
+
+	local function watch(liveRoot)
+		watchMaid:GiveTask(liveRoot.DescendantAdded:Connect(reload))
+		watchMaid:GiveTask(liveRoot.DescendantRemoving:Connect(reload))
+		watchMaid:GiveTask(liveRoot.Changed:Connect(reload))
+	end
+
+	local liveRoot = ServerStorage:FindFirstChild(LIVE_FOLDER)
+	if liveRoot then
+		watch(liveRoot)
+	end
+
+	-- The folder is usually absent until the sync tool writes it, so pick it up whenever it appears.
+	watchMaid:GiveTask(ServerStorage.ChildAdded:Connect(function(Child)
+		if Child.Name == LIVE_FOLDER then
+			watch(Child)
+			reload()
+		end
+	end))
+
+	plugin.Unloading:Connect(function()
+		watchMaid:Destroy()
+	end)
 end

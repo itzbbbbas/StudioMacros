@@ -1,5 +1,5 @@
 return {
-	Name = "Toggle LazyRender";
+	Name = "Toggle Virtualized";
 	Description = "Flip the canvas between hand layout with row windowing and the native layout object.";
 
 	Predicate = function(instance)
@@ -7,10 +7,10 @@ return {
 	end;
 
 	ToggleValue = function(instance)
-		return instance and instance:GetAttribute("LazyRender") or false
+		return instance and instance:GetAttribute("Virtualized") or false
 	end;
 
 	Macro = function(instance)
-		instance:SetAttribute("LazyRender", not instance:GetAttribute("LazyRender"))
+		instance:SetAttribute("Virtualized", not instance:GetAttribute("Virtualized"))
 	end;
 }

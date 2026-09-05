@@ -44,10 +44,11 @@ local function collectGroupFolders()
 	return groups
 end
 
--- TRAP: require caches by instance and a Source edit does not invalidate it, so a live macro must be
+-- TRAP: require caches by instance and a Source edit does not invalidate it, so a live module must be
 -- required through a throwaway clone or the palette keeps running the version it first saw.
-local function requireMacro(module, live)
-	local ok, result = pcall(require, if live then module:Clone() else module)
+-- A GroupData carries Name and Icon and no Macro, so the shape check belongs at each call site.
+local function requireLive(module)
+	local ok, result = pcall(require, module:Clone())
 	if not ok then
 		warn(`[StudioMacros]: {module:GetFullName()} failed to load: {result}`)
 		return nil
@@ -61,8 +62,8 @@ local function requireMacro(module, live)
 		end
 	end
 
-	if type(result) ~= "table" or type(result.Name) ~= "string" or type(result.Macro) ~= "function" then
-		warn(`[StudioMacros]: {module:GetFullName()} is not a macro, it needs a Name and a Macro`)
+	if type(result) ~= "table" then
+		warn(`[StudioMacros]: {module:GetFullName()} must return a table`)
 		return nil
 	end
 
@@ -258,7 +259,7 @@ local function initialize(plugin)
 				continue
 			end
 
-			local groupData = if live then requireMacro(groupDataModule, true) else require(groupDataModule)
+			local groupData = if live then requireLive(groupDataModule) else require(groupDataModule)
 			if type(groupData) ~= "table" or type(groupData.Name) ~= "string" then
 				if live then
 					warn(`[StudioMacros]: {group:GetFullName()} needs a GroupData returning a Name`)
@@ -285,8 +286,12 @@ local function initialize(plugin)
 
 				local macroData
 				if live then
-					macroData = requireMacro(macro, true)
+					macroData = requireLive(macro)
 					if not macroData then
+						continue
+					end
+					if type(macroData.Name) ~= "string" or type(macroData.Macro) ~= "function" then
+						warn(`[StudioMacros]: {macro:GetFullName()} needs a Name and a Macro`)
 						continue
 					end
 				else

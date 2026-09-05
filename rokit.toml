@@ -1,0 +1,6 @@
+# Toolchain for the StudioMacros fork. Upstream pins a quenty rojo canary through aftman; rokit
+# resolves the mainline release instead, which builds this tree fine.
+[tools]
+rojo = "rojo-rbx/rojo@7.7.0"
+stylua = "johnnymorganz/stylua@2.5.2"
+luau-lsp = "JohnnyMorganz/luau-lsp@1.69.0"

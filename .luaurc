@@ -1,0 +1,4 @@
+{
+  "languageMode": "nonstrict",
+  "globals": ["warn", "plugin", "setclipboard", "loadstring"]
+}
